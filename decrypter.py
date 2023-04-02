@@ -8,7 +8,7 @@ BLOB_KEY = bytes([0x90, 0x83, 0x00, 0x04, 0x90, 0xA3, 0x00, 0x08, 0x90, 0xC3, 0x
 
 def get_size(file: BufferedReader) -> int:
     file.seek(0, 2)
-    size = infile.tell()
+    size = file.tell()
     file.seek(0, 0)
 
     return size
