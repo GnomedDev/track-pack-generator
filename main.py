@@ -1,29 +1,30 @@
-from io import BytesIO
+import lzma
 import subprocess
 from configparser import ConfigParser
+from io import BytesIO
 from pathlib import Path
-from PIL import Image
+from shutil import rmtree
 
 import requests
-from os import mkdir
-from sh import cp, mount, rm, umount  # type: ignore
+from PIL import Image
+from sh import mount, umount  # type: ignore
 from sh.contrib import sudo  # type: ignore
 
-CTGP_MOUNT = Path("ctgp")
+CTGP = Path("ctgp")
 OUT = Path("./out")
 IN = Path("./in")
 
-CTGP_ROOT = CTGP_MOUNT / "PACKAGES" / "CTGPR"
+CTGP_ROOT = CTGP / "PACKAGES" / "CTGPR"
 CTGP_TRACKS = CTGP_ROOT / "RACE" / "COURSE"
 
+TRACKS = OUT / "tracks"
 THUMBNAILS = OUT / "thumbnails"
+TEMP_TRACKS = OUT / "temp tracks"
 
 def find_track_id(trackManifest: ConfigParser, sha1: str) -> str | None:
     for track in trackManifest.sections():
         if trackManifest[track]["sha1"] == sha1:
             return track
-
-    print(f"\nWarning: Could not find track with sha1 {sha1}")
 
 def fetch_thumbnail(track_id: str):
     if (THUMBNAILS / f"{track_id}.jpg").exists():
@@ -38,11 +39,17 @@ def fetch_thumbnail(track_id: str):
         thumbnail.save(THUMBNAILS / f"{track_id}.jpg")
 
 def cleanup():
-    if CTGP_MOUNT.exists():
-        umount(CTGP_MOUNT)
-        rm(CTGP_MOUNT, r=True)
+    if CTGP.exists():
+        umount(CTGP)
+        rmtree(CTGP)
 
 def main():
+    for folder in (TRACKS, TEMP_TRACKS):
+        rmtree(folder, ignore_errors=True)
+
+    for folder in (OUT, CTGP, TRACKS, THUMBNAILS, TEMP_TRACKS):
+        folder.mkdir(exist_ok=True)
+
     if not Path(OUT / "blob.dat").exists():
         import decrypter
 
@@ -52,13 +59,7 @@ def main():
             encode=False
         )
 
-    if not (OUT / "tracks").exists():
-        mkdir(OUT / "tracks")
-
-    if not THUMBNAILS.exists():
-        mkdir(THUMBNAILS)
-
-    mount(OUT / "blob.dat", CTGP_MOUNT, mkdir=True)
+    mount(OUT / "blob.dat", CTGP)
 
     trackManifest = ConfigParser()
     trackManifest.read(IN / "tracks.ini")
@@ -72,18 +73,25 @@ def main():
         "race": "",
     }
 
-    for i, track in enumerate(CTGP_TRACKS.glob("*.SZS")):
+    for track in CTGP_TRACKS.glob("*.SZS"):
         sha1 = subprocess.run(["wszst", "sha1", track], capture_output=True).stdout.decode().split(" ")[0]
         track_id = find_track_id(trackManifest, sha1)
 
         if track_id is not None:
-            cp(track, OUT / "tracks" / f"{track_id}.szs")
-            manifest["Pack Info"]["race"] += f"{track_id},"
+            subprocess.run(["wszst", "decompress", "--u8", track, "-d", TEMP_TRACKS / f"{track_id}.u8"])
+            u8_file = TEMP_TRACKS / f"{track_id}.u8"
+            lzma_file = TRACKS / f"{track_id}.arc.lzma"
 
+            with open(u8_file, "rb") as f:
+                with lzma.open(lzma_file, "wb", format=lzma.FORMAT_ALONE) as g:
+                    print(f"RECOMPRESS U8:{u8_file} -> {lzma_file}")
+                    g.write(f.read())
+
+            manifest["Pack Info"]["race"] += f"{track_id},"
             track_id = track_id.rjust(5, "0")
             fetch_thumbnail(track_id)
-
-            print(f"Found track {track_id} ({i})", end="\r")
+        else:
+            print(f"Warning: Could not find track with sha1 {sha1}!")
 
     with open(OUT / "manifest.ini", "w") as f:
         manifest.write(f)
