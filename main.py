@@ -4,6 +4,7 @@ from configparser import ConfigParser
 from io import BytesIO
 from pathlib import Path
 from shutil import rmtree
+from concurrent.futures import ProcessPoolExecutor
 
 import requests
 from PIL import Image
@@ -38,12 +39,22 @@ def fetch_thumbnail(track_id: str):
         thumbnail = thumbnail.resize((256, 144))
         thumbnail.save(THUMBNAILS / f"{track_id}.jpg")
 
+def recompress_track(track: Path, track_id: str):
+    subprocess.run(["wszst", "decompress", "--u8", track, "-d", TEMP_TRACKS / f"{track_id}.u8"])
+
+    u8_file = TEMP_TRACKS / f"{track_id}.u8"
+    lzma_file = TRACKS / f"{track_id}.arc.lzma"
+    with open(u8_file, "rb") as f:
+        with lzma.open(lzma_file, "wb", format=lzma.FORMAT_ALONE) as g:
+            print(f"RECOMPRESS U8:{u8_file} -> {lzma_file}")
+            g.write(f.read())
+
 def cleanup():
     if CTGP.exists():
         umount(CTGP)
         rmtree(CTGP)
 
-def main():
+def main(pool: ProcessPoolExecutor):
     for folder in (TRACKS, TEMP_TRACKS):
         rmtree(folder, ignore_errors=True)
 
@@ -78,18 +89,11 @@ def main():
         track_id = find_track_id(trackManifest, sha1)
 
         if track_id is not None:
-            subprocess.run(["wszst", "decompress", "--u8", track, "-d", TEMP_TRACKS / f"{track_id}.u8"])
-            u8_file = TEMP_TRACKS / f"{track_id}.u8"
-            lzma_file = TRACKS / f"{track_id}.arc.lzma"
-
-            with open(u8_file, "rb") as f:
-                with lzma.open(lzma_file, "wb", format=lzma.FORMAT_ALONE) as g:
-                    print(f"RECOMPRESS U8:{u8_file} -> {lzma_file}")
-                    g.write(f.read())
-
             manifest["Pack Info"]["race"] += f"{track_id},"
             track_id = track_id.rjust(5, "0")
-            fetch_thumbnail(track_id)
+
+            pool.submit(recompress_track, track, track_id)
+            pool.submit(fetch_thumbnail, track_id)
         else:
             print(f"Warning: Could not find track with sha1 {sha1}!")
 
@@ -98,7 +102,8 @@ def main():
 
 if __name__ == "__main__":
     with sudo:
-        try:
-            main()
-        finally:
-            cleanup()
+        with ProcessPoolExecutor() as pool:
+            try:
+                main(pool)
+            finally:
+                cleanup()
