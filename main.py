@@ -25,6 +25,17 @@ def find_track_id(trackManifest: ConfigParser, sha1: str) -> str | None:
 
     print(f"\nWarning: Could not find track with sha1 {sha1}")
 
+def fetch_thumbnail(track_id: str):
+    if (THUMBNAILS / f"{track_id}.jpg").exists():
+        return
+
+    resp = requests.get(f"http://archive.tock.eu/fullpreview/{track_id[-2:]}/{track_id}.jpg")
+    if resp.status_code != 404:
+        resp.raise_for_status()
+
+        thumbnail = Image.open(BytesIO(resp.content))
+        thumbnail = thumbnail.resize((256, 144))
+        thumbnail.save(THUMBNAILS / f"{track_id}.jpg")
 
 def cleanup():
     if CTGP_MOUNT.exists():
@@ -56,10 +67,10 @@ def main():
     manifest["Pack Info"] = {
         "name": "Custom Track Grand Prix",
         "author": "Mr Bean35000vr & Chadderz",
-        "description": "A custom track pack for Mario Kart Wii"
-    }
+        "description": "A custom track pack for Mario Kart Wii",
 
-    manifest["Slot Map"] = {}
+        "race": "",
+    }
 
     for i, track in enumerate(CTGP_TRACKS.glob("*.SZS")):
         sha1 = subprocess.run(["wszst", "sha1", track], capture_output=True).stdout.decode().split(" ")[0]
@@ -67,17 +78,10 @@ def main():
 
         if track_id is not None:
             cp(track, OUT / "tracks" / f"{track_id}.szs")
-            manifest["Slot Map"][track_id] = trackManifest[track_id]["slot"]
+            manifest["Pack Info"]["race"] += f"{track_id},"
 
             track_id = track_id.rjust(5, "0")
-
-            resp = requests.get(f"http://archive.tock.eu/fullpreview/{track_id[-2:]}/{track_id}.jpg")
-            if resp.status_code != 404:
-                resp.raise_for_status()
-
-                thumbnail = Image.open(BytesIO(resp.content))
-                thumbnail = thumbnail.resize((256, 144))
-                thumbnail.save(THUMBNAILS / f"{track_id}.jpg")
+            fetch_thumbnail(track_id)
 
             print(f"Found track {track_id} ({i})", end="\r")
 
