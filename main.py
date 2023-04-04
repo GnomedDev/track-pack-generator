@@ -86,7 +86,7 @@ def main(pool: ProcessPoolExecutor):
     }
 
     for track in CTGP_TRACKS.glob("*.SZS"):
-        sha1 = subprocess.run(["wszst", "sha1", track], capture_output=True).stdout.decode().split(" ")[0]
+        sha1 = subprocess.run(["wszst", "sha1", "--norm", track], capture_output=True).stdout.decode().split(" ")[0]
         track_id = find_track_id(trackManifest, sha1)
 
         if track_id is not None:
