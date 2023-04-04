@@ -28,6 +28,7 @@ def find_track_id(trackManifest: ConfigParser, sha1: str) -> str | None:
             return track
 
 def fetch_thumbnail(track_id: str):
+    track_id = track_id.rjust(5, "0")
     if (THUMBNAILS / f"{track_id}.jpg").exists():
         return
 
@@ -90,8 +91,6 @@ def main(pool: ProcessPoolExecutor):
 
         if track_id is not None:
             manifest["Pack Info"]["race"] += f"{track_id},"
-            track_id = track_id.rjust(5, "0")
-
             pool.submit(recompress_track, track, track_id)
             pool.submit(fetch_thumbnail, track_id)
         else:
