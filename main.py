@@ -11,6 +11,8 @@ from PIL import Image
 from sh import mount, umount  # type: ignore
 from sh.contrib import sudo  # type: ignore
 
+from unreleased_tracks import UNRELEASED_TRACKS
+
 CTGP = Path("ctgp")
 OUT = Path("./out")
 IN = Path("./in")
@@ -24,10 +26,10 @@ TEMP_TRACKS = OUT / "temp tracks"
 
 def find_track_id(trackManifest: ConfigParser, sha1: str) -> str | None:
     for track in trackManifest.sections():
-        if trackManifest[track]["sha1"] == sha1:
+        if trackManifest["sha1"] == sha1:
             return track
 
-def fetch_thumbnail(track_id: str):
+def fetch_thumbnail(track_id: str, sha1: str):
     track_id = track_id.rjust(5, "0")
     if (THUMBNAILS / f"{track_id}.jpg").exists():
         return
@@ -38,13 +40,13 @@ def fetch_thumbnail(track_id: str):
 
         thumbnail = Image.open(BytesIO(resp.content))
         thumbnail = thumbnail.resize((256, 144))
-        thumbnail.save(THUMBNAILS / f"{track_id}.jpg")
+        thumbnail.save(THUMBNAILS / f"{sha1}.jpg")
 
-def recompress_track(track: Path, track_id: str):
-    subprocess.run(["wszst", "decompress", "--u8", track, "-d", TEMP_TRACKS / f"{track_id}.u8"])
+def recompress_track(track: Path, sha1: str):
+    subprocess.run(["wszst", "decompress", "--u8", track, "-d", TEMP_TRACKS / f"{sha1}.u8"])
 
-    u8_file = TEMP_TRACKS / f"{track_id}.u8"
-    lzma_file = TRACKS / f"{track_id}.arc.lzma"
+    u8_file = TEMP_TRACKS / f"{sha1}.u8"
+    lzma_file = TRACKS / f"{sha1}.arc.lzma"
     with open(u8_file, "rb") as f:
         with lzma.open(lzma_file, "wb", format=lzma.FORMAT_ALONE) as g:
             print(f"RECOMPRESS U8:{u8_file} -> {lzma_file}")
@@ -90,11 +92,18 @@ def main(pool: ProcessPoolExecutor):
         track_id = find_track_id(trackManifest, sha1)
 
         if track_id is not None:
-            manifest["Pack Info"]["race"] += f"{track_id},"
-            pool.submit(recompress_track, track, track_id)
-            pool.submit(fetch_thumbnail, track_id)
+            pool.submit(fetch_thumbnail, track_id, sha1)
+        elif (unreleased_info := UNRELEASED_TRACKS.get(sha1)) is not None:
+            manifest[sha1] = {
+                "trackname": unreleased_info.name,
+                "slot": str(unreleased_info.slot),
+                "ctype": "1"
+            }
         else:
-            print(f"Warning: Could not find track with sha1 {sha1}!")
+            continue
+
+        manifest["Pack Info"]["race"] += f"{sha1},"
+        pool.submit(recompress_track, track, sha1)
 
     with open(OUT / "manifest.ini", "w") as f:
         manifest.write(f)
