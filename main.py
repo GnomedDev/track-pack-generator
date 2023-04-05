@@ -1,7 +1,7 @@
 import lzma
 import subprocess
 from configparser import ConfigParser
-from io import BytesIO
+from io import BytesIO, IOBase
 from pathlib import Path
 from shutil import rmtree
 from concurrent.futures import ProcessPoolExecutor
@@ -24,10 +24,15 @@ TRACKS = OUT / "tracks"
 THUMBNAILS = OUT / "thumbnails"
 TEMP_TRACKS = OUT / "temp tracks"
 
+def process_thumbnail(sha1: str, raw: IOBase):
+    image = Image.open(raw)
+    image = image.resize((256, 144))
+    image.save(THUMBNAILS / f"{sha1}.jpg")
+
 def find_track_id(trackManifest: ConfigParser, sha1: str) -> str | None:
-    for track in trackManifest.sections():
-        if trackManifest["sha1"] == sha1:
-            return track
+    for track_sha1 in trackManifest.sections():
+        if track_sha1 == sha1:
+            return trackManifest[sha1]["id"]
 
 def fetch_thumbnail(track_id: str, sha1: str):
     track_id = track_id.rjust(5, "0")
@@ -35,12 +40,18 @@ def fetch_thumbnail(track_id: str, sha1: str):
         return
 
     resp = requests.get(f"http://archive.tock.eu/fullpreview/{track_id[-2:]}/{track_id}.jpg")
-    if resp.status_code != 404:
-        resp.raise_for_status()
+    if resp.status_code == 404:
+        backup_thumbnail = Path(f"thumbnails/{sha1}.png")
+        if not backup_thumbnail.exists():
+            return
 
-        thumbnail = Image.open(BytesIO(resp.content))
-        thumbnail = thumbnail.resize((256, 144))
-        thumbnail.save(THUMBNAILS / f"{sha1}.jpg")
+        with open(backup_thumbnail, "rb") as f:
+            resp_bytes = f.read()
+    else:
+        resp.raise_for_status()
+        resp_bytes = resp.content
+
+    process_thumbnail(sha1, BytesIO(resp_bytes))
 
 def recompress_track(track: Path, sha1: str):
     subprocess.run(["wszst", "decompress", "--u8", track, "-d", TEMP_TRACKS / f"{sha1}.u8"])
@@ -99,6 +110,14 @@ def main(pool: ProcessPoolExecutor):
                 "slot": str(unreleased_info.slot),
                 "ctype": "1"
             }
+
+            try:
+                with open(f"thumbnails/{sha1}.png", "rb") as f:
+                    raw = f.read()
+            except FileNotFoundError:
+                print(f"Warning: Could not find thumbnail for {sha1}")
+            else:
+                process_thumbnail(sha1, BytesIO(raw))
         else:
             continue
 
@@ -110,8 +129,8 @@ def main(pool: ProcessPoolExecutor):
 
 if __name__ == "__main__":
     with sudo:
-        with ProcessPoolExecutor() as pool:
-            try:
+        try:
+            with ProcessPoolExecutor() as pool:
                 main(pool)
-            finally:
-                cleanup()
+        finally:
+            cleanup()
