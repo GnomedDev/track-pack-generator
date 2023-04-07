@@ -11,7 +11,7 @@ from PIL import Image
 from sh import mount, umount  # type: ignore
 from sh.contrib import sudo  # type: ignore
 
-from unreleased_tracks import UNRELEASED_TRACKS
+import crs1
 
 CTGP = Path("ctgp")
 OUT = Path("./out")
@@ -98,16 +98,21 @@ def main(pool: ProcessPoolExecutor):
         "race": "",
     }
 
+    with open(CTGP_ROOT / "CRS1.BIN", "rb") as f:
+        pack_info = crs1.parse(f)
+
+    missed_tracks = []
     for track in CTGP_TRACKS.glob("*.SZS"):
         sha1 = subprocess.run(["wszst", "sha1", "--norm", track], capture_output=True).stdout.decode().split(" ")[0]
         track_id = find_track_id(trackManifest, sha1)
 
         if track_id is not None:
             pool.submit(fetch_thumbnail, track_id, sha1)
-        elif (unreleased_info := UNRELEASED_TRACKS.get(sha1)) is not None:
+        elif (track_info := pack_info.get(track.stem)):
             manifest[sha1] = {
-                "trackname": unreleased_info.name,
-                "slot": str(unreleased_info.slot),
+                "trackname": track_info.course_name,
+                "mslot": str(track_info.music_id),
+                "slot": str(track_info.slot_id),
                 "ctype": "1"
             }
 
@@ -119,13 +124,17 @@ def main(pool: ProcessPoolExecutor):
             else:
                 process_thumbnail(sha1, BytesIO(raw))
         else:
-            continue
+            missed_tracks.append((track, sha1))
 
         manifest["Pack Info"]["race"] += f"{sha1},"
         pool.submit(recompress_track, track, sha1)
 
     with open(OUT / "manifest.ini", "w") as f:
         manifest.write(f)
+
+    with open(OUT / "missed_tracks.log", "w") as f:
+        for (track, sha1) in missed_tracks:
+            f.write(f"{track.stem} {sha1}\n")
 
 if __name__ == "__main__":
     with sudo:
