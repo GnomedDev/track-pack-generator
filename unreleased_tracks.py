@@ -4,6 +4,7 @@ from dataclasses import dataclass
 class Track:
     name: str
     slot: int
+    ctype: int = 1
 
 UNRELEASED_TRACKS = {
     "7e293e74991b0bf33e2ffa420b2ebe735ed23c38": Track("Six King Labyrinth", 44),

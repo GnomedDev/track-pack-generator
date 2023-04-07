@@ -1,10 +1,12 @@
 import lzma
 import subprocess
+from concurrent.futures import ProcessPoolExecutor
 from configparser import ConfigParser
+from dataclasses import dataclass
 from io import BytesIO, IOBase
 from pathlib import Path
 from shutil import rmtree
-from concurrent.futures import ProcessPoolExecutor
+from typing import Callable, Generator
 
 import requests
 from PIL import Image
@@ -13,16 +15,30 @@ from sh.contrib import sudo  # type: ignore
 
 from unreleased_tracks import UNRELEASED_TRACKS
 
+
+@dataclass
+class PackInfo:
+    name: str
+    author: str
+    description: str
+
+    course_folder: Path
+    preprocess: Callable[[], None]
+    cleanup: Callable[[], None]
+
 CTGP = Path("ctgp")
 OUT = Path("./out")
 IN = Path("./in")
 
-CTGP_ROOT = CTGP / "PACKAGES" / "CTGPR"
-CTGP_TRACKS = CTGP_ROOT / "RACE" / "COURSE"
+CTGP_TRACKS = CTGP / "PACKAGES" / "CTGPR" / "RACE" / "COURSE"
 
 TRACKS = OUT / "tracks"
 THUMBNAILS = OUT / "thumbnails"
 TEMP_TRACKS = OUT / "temp tracks"
+
+def glob_multi(folder: Path, *patterns: str) -> Generator[Path, None, None]:
+    for pat in patterns:
+        yield from folder.glob(pat)
 
 def process_thumbnail(sha1: str, raw: IOBase):
     image = Image.open(raw)
@@ -63,18 +79,8 @@ def recompress_track(track: Path, sha1: str):
             print(f"RECOMPRESS U8:{u8_file} -> {lzma_file}")
             g.write(f.read())
 
-def cleanup():
-    if CTGP.exists():
-        umount(CTGP)
-        rmtree(CTGP)
 
-def main(pool: ProcessPoolExecutor):
-    for folder in (TRACKS, TEMP_TRACKS):
-        rmtree(folder, ignore_errors=True)
-
-    for folder in (OUT, CTGP, TRACKS, THUMBNAILS, TEMP_TRACKS):
-        folder.mkdir(exist_ok=True)
-
+def ctgp_extract():
     if not Path(OUT / "blob.dat").exists():
         import decrypter
 
@@ -84,31 +90,59 @@ def main(pool: ProcessPoolExecutor):
             encode=False
         )
 
+    CTGP.mkdir(exist_ok=True)
     mount(OUT / "blob.dat", CTGP)
+
+def ctgp_cleanup():
+    if CTGP.exists():
+        umount(CTGP)
+        rmtree(CTGP)
+
+
+def identity(): ...
+
+PACKS = {
+    "CTGP": PackInfo("Custom Track Grand Prix", "Mr Bean35000vr & Chadderz", "A custom track pack for Mario Kart Wii", CTGP_TRACKS, ctgp_extract, ctgp_cleanup),
+    "MKW-DX": PackInfo("Mario Kart Wii Deluxe", "FJRoyet", "A custom track pack for Mario Kart Wii", IN / "Course", identity, identity),
+}
+
+
+def main(pack: PackInfo, pool: ProcessPoolExecutor):
+    for folder in (TRACKS, TEMP_TRACKS):
+        rmtree(folder, ignore_errors=True)
+
+    for folder in (OUT, TRACKS, THUMBNAILS, TEMP_TRACKS):
+        folder.mkdir(exist_ok=True)
+
+    pack.preprocess()
 
     trackManifest = ConfigParser()
     trackManifest.read(IN / "tracks.ini")
 
     manifest = ConfigParser()
     manifest["Pack Info"] = {
-        "name": "Custom Track Grand Prix",
-        "author": "Mr Bean35000vr & Chadderz",
-        "description": "A custom track pack for Mario Kart Wii",
+        "name": pack.name,
+        "author": pack.author,
+        "description": pack.description,
 
         "race": "",
+        "coin": "",
+        "balloon": "",
     }
 
-    for track in CTGP_TRACKS.glob("*.SZS"):
+    for track in glob_multi(pack.course_folder, "*.SZS", "*.szs"):
         sha1 = subprocess.run(["wszst", "sha1", "--norm", track], capture_output=True).stdout.decode().split(" ")[0]
         track_id = find_track_id(trackManifest, sha1)
 
+        is_battle = trackManifest.get(sha1, "type", fallback=None) == "2"
         if track_id is not None:
             pool.submit(fetch_thumbnail, track_id, sha1)
         elif (unreleased_info := UNRELEASED_TRACKS.get(sha1)) is not None:
+            is_battle = unreleased_info.ctype == 2
             manifest[sha1] = {
                 "trackname": unreleased_info.name,
                 "slot": str(unreleased_info.slot),
-                "ctype": "1"
+                "ctype": str(unreleased_info.ctype)
             }
 
             try:
@@ -119,18 +153,27 @@ def main(pool: ProcessPoolExecutor):
             else:
                 process_thumbnail(sha1, BytesIO(raw))
         else:
+            print(f"!!! Could not find information for {track.stem} ({sha1}) !!!")
             continue
 
-        manifest["Pack Info"]["race"] += f"{sha1},"
+        manifest_pack_info = manifest["Pack Info"]
+        if is_battle:
+            manifest_pack_info["coin"] += f"{sha1},"
+            manifest_pack_info["balloon"] += f"{sha1},"
+        else:
+            manifest_pack_info["race"] += f"{sha1},"
+
         pool.submit(recompress_track, track, sha1)
 
     with open(OUT / "manifest.ini", "w") as f:
         manifest.write(f)
 
 if __name__ == "__main__":
+    pack = PACKS[input("Pack: ")]
+
     with sudo:
         try:
             with ProcessPoolExecutor() as pool:
-                main(pool)
+                main(pack, pool)
         finally:
-            cleanup()
+            pack.cleanup()
