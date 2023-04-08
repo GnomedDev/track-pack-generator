@@ -104,6 +104,7 @@ def identity(): ...
 PACKS = {
     "CTGP": PackInfo("Custom Track Grand Prix", "Mr Bean35000vr & Chadderz", "A custom track pack for Mario Kart Wii", CTGP_TRACKS, ctgp_extract, ctgp_cleanup),
     "MKW-DX": PackInfo("Mario Kart Wii Deluxe", "FJRoyet", "A custom track pack for Mario Kart Wii", IN / "Course", identity, identity),
+    "MIDNIGHT": PackInfo("Mario Kart Midnight", "marionose1, ZPL, and Demonz", "A celebration of custom tracks, featuring the \"best\" tracks released between December 2021 and November 2022.", IN / "midnight", identity, identity),
 }
 
 
