@@ -125,12 +125,10 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
         "name": pack.name,
         "author": pack.author,
         "description": pack.description,
-
-        "race": "",
-        "coin": "",
-        "balloon": "",
     }
 
+    race_tracks = []
+    battle_tracks = []
     for track in glob_multi(pack.course_folder, "*.SZS", "*.szs"):
         sha1 = subprocess.run(["wszst", "sha1", "--norm", track], capture_output=True).stdout.decode().split(" ")[0]
         track_id = find_track_id(trackManifest, sha1)
@@ -157,14 +155,17 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
             print(f"!!! Could not find information for {track.stem} ({sha1}) !!!")
             continue
 
-        manifest_pack_info = manifest["Pack Info"]
-        if is_battle:
-            manifest_pack_info["coin"] += f"{sha1},"
-            manifest_pack_info["balloon"] += f"{sha1},"
+        track_list = battle_tracks if is_battle else race_tracks
+        if sha1 not in track_list:
+            track_list.append(sha1)
+            pool.submit(recompress_track, track, sha1)
         else:
-            manifest_pack_info["race"] += f"{sha1},"
+            print(f"!!! Duplicate track {track.stem} ({sha1}) !!!)")
 
-        pool.submit(recompress_track, track, sha1)
+    manifest_pack_info = manifest["Pack Info"]
+    manifest_pack_info["race"] = ",".join(race_tracks)
+    manifest_pack_info["coin"] = ",".join(battle_tracks)
+    manifest_pack_info["balloon"] = manifest_pack_info["coin"]
 
     with open(OUT / "manifest.ini", "w") as f:
         manifest.write(f)
