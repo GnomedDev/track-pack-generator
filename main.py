@@ -1,4 +1,5 @@
 import lzma
+import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from configparser import ConfigParser
@@ -35,6 +36,7 @@ CTGP_TRACKS = CTGP / "PACKAGES" / "CTGPR" / "RACE" / "COURSE"
 TRACKS = OUT / "tracks"
 THUMBNAILS = OUT / "thumbnails"
 TEMP_TRACKS = OUT / "temp tracks"
+UNKNOWN_TRACKS = OUT / "unknown tracks"
 
 def glob_multi(folder: Path, *patterns: str) -> Generator[Path, None, None]:
     for pat in patterns:
@@ -45,10 +47,15 @@ def process_thumbnail(sha1: str, raw: IOBase):
     image = image.resize((256, 144))
     image.save(THUMBNAILS / f"{sha1}.jpg")
 
-def find_track_id(trackManifest: ConfigParser, sha1: str) -> str | None:
+def find_track_id(trackManifest: ConfigParser, sha1: str) -> tuple[str, str] | None:
     for track_sha1 in trackManifest.sections():
         if track_sha1 == sha1:
-            return trackManifest[sha1]["id"]
+            return (sha1, trackManifest[sha1]["id"])
+
+    for alias_sha1, track_sha1 in trackManifest["aliases"].items():
+        if alias_sha1 == sha1:
+            print(f"Using aliased track for {trackManifest[track_sha1]['trackname']}")
+            return (track_sha1, trackManifest[track_sha1]["id"])
 
 def fetch_thumbnail(track_id: str, sha1: str):
     track_id = track_id.rjust(5, "0")
@@ -109,10 +116,10 @@ PACKS = {
 
 
 def main(pack: PackInfo, pool: ProcessPoolExecutor):
-    for folder in (TRACKS, TEMP_TRACKS):
+    for folder in (TRACKS, TEMP_TRACKS, UNKNOWN_TRACKS):
         rmtree(folder, ignore_errors=True)
 
-    for folder in (OUT, TRACKS, THUMBNAILS, TEMP_TRACKS):
+    for folder in (OUT, TRACKS, THUMBNAILS, TEMP_TRACKS, UNKNOWN_TRACKS):
         folder.mkdir(exist_ok=True)
 
     pack.preprocess()
@@ -131,10 +138,15 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
     battle_tracks = []
     for track in glob_multi(pack.course_folder, "*.SZS", "*.szs"):
         sha1 = subprocess.run(["wszst", "sha1", "--norm", track], capture_output=True).stdout.decode().split(" ")[0]
-        track_id = find_track_id(trackManifest, sha1)
+        if sha1 == "d52d50bf4c8aa6a48dfbc361e642b1d314a2ff6d":
+            # CTGP has empty track files...
+            continue
 
+        track_info = find_track_id(trackManifest, sha1)
         is_battle = trackManifest.get(sha1, "type", fallback=None) == "2"
-        if track_id is not None:
+
+        if track_info is not None:
+            sha1, track_id = track_info
             pool.submit(fetch_thumbnail, track_id, sha1)
         elif (unreleased_info := UNRELEASED_TRACKS.get(sha1)) is not None:
             is_battle = unreleased_info.ctype == 2
@@ -153,6 +165,7 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
                 process_thumbnail(sha1, BytesIO(raw))
         else:
             print(f"!!! Could not find information for {track.stem} ({sha1}) !!!")
+            shutil.copyfile(track, UNKNOWN_TRACKS / track.name)
             continue
 
         track_list = battle_tracks if is_battle else race_tracks
