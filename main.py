@@ -15,7 +15,7 @@ from sh import mount, umount  # type: ignore
 from sh.contrib import sudo  # type: ignore
 
 from unreleased_tracks import UNRELEASED_TRACKS
-
+from TrackPacks_pb2 import Pack, ProtoTrack, ProtoSha1
 
 @dataclass
 class PackInfo:
@@ -77,7 +77,7 @@ def fetch_thumbnail(track_id: str, sha1: str):
     process_thumbnail(sha1, BytesIO(resp_bytes))
 
 def recompress_track(track: Path, sha1: str):
-    subprocess.run(["wszst", "decompress", "--u8", track, "-d", TEMP_TRACKS / f"{sha1}.u8"])
+    subprocess.run(["wszst", "decompress", "--norm", "--u8", track, "-d", TEMP_TRACKS / f"{sha1}.u8"])
 
     u8_file = TEMP_TRACKS / f"{sha1}.u8"
     lzma_file = TRACKS / f"{sha1}.arc.lzma"
@@ -127,17 +127,12 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
     trackManifest = ConfigParser()
     trackManifest.read(IN / "tracks.ini")
 
-    manifest = ConfigParser()
-    manifest["Pack Info"] = {
-        "name": pack.name,
-        "author": pack.author,
-        "description": pack.description,
-    }
-
-    race_tracks = []
-    battle_tracks = []
+    race_tracks: list[ProtoSha1] = []
+    battle_tracks: list[ProtoSha1] = []
+    unreleased_tracks: list[ProtoTrack] = []
     for track in glob_multi(pack.course_folder, "*.SZS", "*.szs"):
         sha1 = subprocess.run(["wszst", "sha1", "--norm", track], capture_output=True).stdout.decode().split(" ")[0]
+        protoSha1 = ProtoSha1(data=bytes.fromhex(sha1))
         if sha1 == "d52d50bf4c8aa6a48dfbc361e642b1d314a2ff6d":
             # CTGP has empty track files...
             continue
@@ -150,11 +145,12 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
             pool.submit(fetch_thumbnail, track_id, sha1)
         elif (unreleased_info := UNRELEASED_TRACKS.get(sha1)) is not None:
             is_battle = unreleased_info.ctype == 2
-            manifest[sha1] = {
-                "trackname": unreleased_info.name,
-                "slot": str(unreleased_info.slot),
-                "ctype": str(unreleased_info.ctype)
-            }
+            unreleased_tracks.append(ProtoTrack (
+                sha1=ProtoSha1(data=bytes.fromhex(sha1)),
+                name=unreleased_info.name,
+                slotId=unreleased_info.slot,
+                type=unreleased_info.ctype,
+            ))
 
             try:
                 with open(f"thumbnails/{sha1}.png", "rb") as f:
@@ -169,19 +165,22 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
             continue
 
         track_list = battle_tracks if is_battle else race_tracks
-        if sha1 not in track_list:
-            track_list.append(sha1)
+        if protoSha1 not in track_list:
+            track_list.append(protoSha1)
             pool.submit(recompress_track, track, sha1)
         else:
             print(f"!!! Duplicate track {track.stem} ({sha1}) !!!)")
 
-    manifest_pack_info = manifest["Pack Info"]
-    manifest_pack_info["race"] = ",".join(race_tracks)
-    manifest_pack_info["coin"] = ",".join(battle_tracks)
-    manifest_pack_info["balloon"] = manifest_pack_info["coin"]
-
-    with open(OUT / "manifest.ini", "w") as f:
-        manifest.write(f)
+    with open(OUT / "manifest.pb.bin", "wb") as f:
+        f.write(Pack(
+            name=pack.name,
+            authorNames=pack.author,
+            description=pack.description,
+            raceTracks=race_tracks,
+            coinTracks=battle_tracks,
+            balloonTracks=battle_tracks,
+            unreleasedTracks=unreleased_tracks,
+        ).SerializeToString())
 
 if __name__ == "__main__":
     pack = PACKS[input("Pack: ")]
