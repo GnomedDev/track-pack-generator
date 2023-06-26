@@ -2,7 +2,6 @@ import lzma
 import shutil
 import subprocess
 from concurrent.futures import ProcessPoolExecutor
-from configparser import ConfigParser
 from dataclasses import dataclass
 from io import BytesIO, IOBase
 from pathlib import Path
@@ -14,8 +13,9 @@ from PIL import Image
 from sh import mount, umount  # type: ignore
 from sh.contrib import sudo  # type: ignore
 
+from TrackPacks_pb2 import AliasDB, Pack, ProtoSha1, ProtoTrack
 from unreleased_tracks import UNRELEASED_TRACKS
-from TrackPacks_pb2 import Pack, ProtoTrack, ProtoSha1
+
 
 @dataclass
 class PackInfo:
@@ -47,15 +47,19 @@ def process_thumbnail(sha1: str, raw: IOBase):
     image = image.resize((256, 144))
     image.save(THUMBNAILS / f"{sha1}.jpg")
 
-def find_track_id(trackManifest: ConfigParser, sha1: str) -> tuple[str, str] | None:
-    for track_sha1 in trackManifest.sections():
-        if track_sha1 == sha1:
-            return (sha1, trackManifest[sha1]["id"])
+def find_track_id(alias_db: AliasDB, proto_sha1: ProtoSha1) -> tuple[ProtoSha1, ProtoTrack] | None:
+    try:
+        sha1 = proto_sha1.data.hex()
+        with open(f"in/tracks/{sha1}.pb.bin", "rb") as track_file:
+            track = ProtoTrack()
+            track.ParseFromString(track_file.read())
 
-    for alias_sha1, track_sha1 in trackManifest["aliases"].items():
-        if alias_sha1 == sha1:
-            print(f"Using aliased track for {trackManifest[track_sha1]['trackname']}")
-            return (track_sha1, trackManifest[track_sha1]["id"])
+            return (proto_sha1, track)
+    except FileNotFoundError:
+        for alias_value in alias_db.aliases:
+            if alias_value.aliased == proto_sha1:
+                track = find_track_id(alias_db, alias_value.real)
+                return track
 
 def fetch_thumbnail(track_id: str, sha1: str):
     track_id = track_id.rjust(5, "0")
@@ -76,16 +80,20 @@ def fetch_thumbnail(track_id: str, sha1: str):
 
     process_thumbnail(sha1, BytesIO(resp_bytes))
 
-def recompress_track(track: Path, sha1: str):
-    subprocess.run(["wszst", "decompress", "--norm", "--u8", track, "-d", TEMP_TRACKS / f"{sha1}.u8"])
+def recompress_track(track_path: Path, proto_sha1: ProtoSha1, track: ProtoTrack):
+    sha1 = proto_sha1.data.hex()
+    subprocess.run(["wszst", "decompress", "--norm", "--u8", track_path, "-d", TEMP_TRACKS / f"{sha1}.u8"])
 
     u8_file = TEMP_TRACKS / f"{sha1}.u8"
+    meta_file = TRACKS / f"{sha1}.pb.bin"
     lzma_file = TRACKS / f"{sha1}.arc.lzma"
     with open(u8_file, "rb") as f:
         with lzma.open(lzma_file, "wb", format=lzma.FORMAT_ALONE) as g:
             print(f"RECOMPRESS U8:{u8_file} -> {lzma_file}")
             g.write(f.read())
 
+    with open(meta_file, "wb") as meta:
+        meta.write(track.SerializeToString())
 
 def ctgp_extract():
     if not Path(OUT / "blob.dat").exists():
@@ -124,33 +132,35 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
 
     pack.preprocess()
 
-    trackManifest = ConfigParser()
-    trackManifest.read(IN / "tracks.ini")
+    with open("in/alias.pb.bin", "rb") as alias_file:
+        alias_db = AliasDB()
+        alias_db.ParseFromString(alias_file.read())
 
     race_tracks: list[ProtoSha1] = []
     battle_tracks: list[ProtoSha1] = []
-    unreleased_tracks: list[ProtoTrack] = []
-    for track in glob_multi(pack.course_folder, "*.SZS", "*.szs"):
-        sha1 = subprocess.run(["wszst", "sha1", "--norm", track], capture_output=True).stdout.decode().split(" ")[0]
-        protoSha1 = ProtoSha1(data=bytes.fromhex(sha1))
+    for track_path in glob_multi(pack.course_folder, "*.SZS", "*.szs"):
+        sha1 = subprocess.run(["wszst", "sha1", "--norm", track_path], capture_output=True).stdout.decode().split(" ")[0]
         if sha1 == "d52d50bf4c8aa6a48dfbc361e642b1d314a2ff6d":
             # CTGP has empty track files...
             continue
 
-        track_info = find_track_id(trackManifest, sha1)
-        is_battle = trackManifest.get(sha1, "type", fallback=None) == "2"
+        proto_sha1 = ProtoSha1(data=bytes.fromhex(sha1))
+        track_info = find_track_id(alias_db, proto_sha1)
 
+        track: ProtoTrack
         if track_info is not None:
-            sha1, track_id = track_info
-            pool.submit(fetch_thumbnail, track_id, sha1)
+            proto_sha1, track = track_info
+            sha1 = proto_sha1.data.hex()
+            is_battle = track.type == 2
+
+            pool.submit(fetch_thumbnail, str(track.wiimmId), sha1)
         elif (unreleased_info := UNRELEASED_TRACKS.get(sha1)) is not None:
             is_battle = unreleased_info.ctype == 2
-            unreleased_tracks.append(ProtoTrack (
-                sha1=ProtoSha1(data=bytes.fromhex(sha1)),
+            track = ProtoTrack (
                 name=unreleased_info.name,
                 slotId=unreleased_info.slot,
                 type=unreleased_info.ctype,
-            ))
+            )
 
             try:
                 with open(f"thumbnails/{sha1}.png", "rb") as f:
@@ -160,16 +170,16 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
             else:
                 process_thumbnail(sha1, BytesIO(raw))
         else:
-            print(f"!!! Could not find information for {track.stem} ({sha1}) !!!")
-            shutil.copyfile(track, UNKNOWN_TRACKS / track.name)
+            print(f"!!! Could not find information for {track_path.stem} ({sha1}) !!!")
+            shutil.copyfile(track_path, UNKNOWN_TRACKS / track_path.name)
             continue
 
         track_list = battle_tracks if is_battle else race_tracks
-        if protoSha1 not in track_list:
-            track_list.append(protoSha1)
-            pool.submit(recompress_track, track, sha1)
+        if proto_sha1 not in track_list:
+            track_list.append(proto_sha1)
+            pool.submit(recompress_track, track_path, proto_sha1, track)
         else:
-            print(f"!!! Duplicate track {track.stem} ({sha1}) !!!)")
+            print(f"!!! Duplicate track {track_path.stem} ({sha1}) !!!)")
 
     with open(OUT / "manifest.pb.bin", "wb") as f:
         f.write(Pack(
@@ -179,7 +189,6 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
             raceTracks=race_tracks,
             coinTracks=battle_tracks,
             balloonTracks=battle_tracks,
-            unreleasedTracks=unreleased_tracks,
         ).SerializeToString())
 
 if __name__ == "__main__":
