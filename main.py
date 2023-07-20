@@ -151,15 +151,14 @@ def main(pack: PackInfo, pool: ProcessPoolExecutor):
         if track_info is not None:
             proto_sha1, track = track_info
             sha1 = proto_sha1.data.hex()
-            is_battle = track.type == 2
+            is_battle = track.courseId >= 0x20
 
             pool.submit(fetch_thumbnail, str(track.wiimmId), sha1)
         elif (unreleased_info := UNRELEASED_TRACKS.get(sha1)) is not None:
-            is_battle = unreleased_info.ctype == 2
+            is_battle = unreleased_info.courseId >= 0x20
             track = ProtoTrack (
                 name=unreleased_info.name,
-                slotId=unreleased_info.slot,
-                type=unreleased_info.ctype,
+                courseId=unreleased_info.courseId,
             )
 
             try:
